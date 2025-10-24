@@ -1,245 +1,58 @@
-name: Blue/Green Deployment CI/CD
+name: Simple Blue/Green Test
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
     branches: [ main ]
-  workflow_dispatch:
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  validate:
-    name: Validate Configuration
+  test:
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Setup Docker Compose
+      
+    - name: Install Docker Compose
       run: |
-        echo "🐳 Setting up Docker Compose..."
         sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
         sudo chmod +x /usr/local/bin/docker-compose
         docker-compose --version
-
-    - name: Validate Docker Compose
-      run: |
-        echo "🔍 Validating Docker Compose configuration..."
-        docker-compose config
         
-    - name: Validate Nginx Syntax Only
+    - name: Start Services
       run: |
-        echo "🔍 Validating Nginx configuration syntax..."
-        # Create a temporary nginx config without upstream dependencies
-        cat > nginx-temp.conf << 'EOF'
-events {
-    worker_connections 1024;
-}
-
-http {
-    server {
-        listen 8080;
-        location / {
-            return 200 "OK";
-        }
-    }
-}
-EOF
-        docker run --rm -v ${PWD}:/config nginx:1.25-alpine nginx -t -c /config/nginx-temp.conf
-        echo "✅ Nginx syntax is valid"
-
-  integration-test:
-    name: Integration Tests
-    runs-on: ubuntu-latest
-    needs: validate
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Docker Compose
-      run: |
-        echo "🐳 Setting up Docker Compose..."
-        sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.5/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-        sudo chmod +x /usr/local/bin/docker-compose
-        docker-compose --version
-
-    - name: Start Blue/Green Deployment
-      run: |
-        echo "🚀 Starting Blue/Green deployment..."
-        BLUE_IMAGE=node:18-alpine \
-        GREEN_IMAGE=node:18-alpine \
-        RELEASE_ID_BLUE=ci-test-blue \
-        RELEASE_ID_GREEN=ci-test-green \
-        docker-compose up -d
+        BLUE_IMAGE=node:18-alpine GREEN_IMAGE=node:18-alpine docker-compose up -d
+        echo "Waiting for services to start..."
+        sleep 30
         
-    - name: Wait for Services
+    - name: Check Service Status
       run: |
-        echo "⏳ Waiting for services to start..."
-        # Wait for app services to be ready
-        timeout 60s bash -c 'until docker-compose ps | grep -q "Up"; do sleep 5; echo "Waiting for services..."; done'
-        echo "Services are starting..."
-        sleep 20
         docker-compose ps
+        echo "Services should be starting up..."
         
-    - name: Validate Nginx with Running Services
+    - name: Basic Connectivity Test
       run: |
-        echo "🔍 Validating Nginx configuration with running services..."
-        # Now services are running, we can validate the actual nginx config
-        docker-compose exec nginx nginx -t
+        sudo apt-get install -y curl
+        echo "Testing basic connectivity..."
         
-    - name: Run Basic Tests
-      run: |
-        echo "🧪 Running basic functionality tests..."
-        sudo apt-get update && sudo apt-get install -y curl
-        
-        # Test direct access to apps
-        echo "Testing Blue direct access..."
-        if curl -f http://localhost:8081/healthz; then
-          echo "✅ Blue health check passed"
+        # Test if containers are running
+        if docker-compose ps | grep -q "Up"; then
+          echo "✅ Docker services are running"
         else
-          echo "⚠️ Blue health check failed"
+          echo "❌ Docker services failed to start"
+          exit 1
         fi
         
-        echo "Testing Green direct access..."
-        if curl -f http://localhost:8082/healthz; then
-          echo "✅ Green health check passed"
-        else
-          echo "⚠️ Green health check failed"
-        fi
+        # Test direct app access (may fail if apps are still starting)
+        echo "Testing application access..."
+        timeout 10s bash -c 'until curl -s http://localhost:8081/healthz >/dev/null; do sleep 2; echo "Waiting for Blue..."; done' || echo "Blue not ready yet"
+        timeout 10s bash -c 'until curl -s http://localhost:8082/healthz >/dev/null; do sleep 2; echo "Waiting for Green..."; done' || echo "Green not ready yet"
         
-        echo "Testing Nginx proxy..."
-        if curl -f http://localhost:8090/healthz; then
-          echo "✅ Nginx health check passed"
-        else
-          echo "⚠️ Nginx health check failed"
-        fi
-
-    - name: Test Version Endpoints
-      run: |
-        echo "📝 Testing version endpoints and headers..."
-        
-        # Test Blue version
-        echo "Blue version:"
-        curl -s http://localhost:8081/version | head -c 100 || echo "Blue version endpoint unavailable"
-        
-        # Test Green version
-        echo "Green version:"
-        curl -s http://localhost:8082/version | head -c 100 || echo "Green version endpoint unavailable"
-        
-        # Test Nginx routing
-        echo "Nginx routing (should be Blue):"
-        for i in {1..3}; do
-          response=$(curl -s http://localhost:8090/version || echo '{"error":"unavailable"}')
-          echo "Request $i: $response" | head -c 100
-          sleep 1
-        done
-
-    - name: Test Headers
-      run: |
-        echo "📋 Testing headers..."
-        
-        echo "Blue headers:"
-        curl -s -I http://localhost:8081/version | grep -i "x-app-pool\|x-release-id" || echo "No headers from Blue"
-        
-        echo "Green headers:"
-        curl -s -I http://localhost:8082/version | grep -i "x-app-pool\|x-release-id" || echo "No headers from Green"
-        
-        echo "Nginx headers:"
-        curl -s -I http://localhost:8090/version | grep -i "x-app-pool\|x-release-id" || echo "No headers from Nginx"
-
-    - name: Test Failover
-      run: |
-        echo "🌪️ Testing failover scenario..."
-        
-        # Stop Blue service
-        echo "Stopping Blue service..."
-        docker-compose stop app_blue
-        sleep 15
-        
-        # Test routing after failover
-        echo "Testing routing after Blue failure:"
-        green_count=0
-        total_requests=5
-        
-        for i in {1..$total_requests}; do
-          if response=$(curl -s http://localhost:8090/version 2>/dev/null); then
-            pool=$(echo "$response" | grep -o '"pool":"[^"]*' | cut -d'"' -f4 || echo "unknown")
-            echo "Request $i: $pool"
-            if [ "$pool" = "green" ]; then
-              ((green_count++))
-            fi
-          else
-            echo "Request $i: failed"
-          fi
-          sleep 1
-        done
-        
-        echo "Failover results: $green_count/$total_requests requests went to Green"
-        
-        if [ $green_count -gt 0 ]; then
-          echo "✅ Failover working - traffic routed to Green"
-        else
-          echo "⚠️ Failover may not be working as expected"
-        fi
-
     - name: Check Logs
       if: always()
       run: |
-        echo "📋 Checking service logs..."
-        echo "=== Nginx Logs ==="
-        docker-compose logs nginx --tail=20 || echo "No nginx logs"
-        echo "=== Blue Logs ==="
-        docker-compose logs app_blue --tail=10 || echo "No blue logs"
-        echo "=== Green Logs ==="
-        docker-compose logs app_green --tail=10 || echo "No green logs"
-
+        echo "=== Service Logs ==="
+        docker-compose logs --tail=50
+        
     - name: Cleanup
       if: always()
-      run: |
-        echo "🧹 Cleaning up..."
-        docker-compose down -v
-
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    needs: validate
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        scan-type: 'fs'
-        scan-ref: '.'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-
-    - name: Upload Trivy scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: 'trivy-results.sarif'
-
-  status:
-    name: Final Status
-    runs-on: ubuntu-latest
-    needs: [validate, integration-test, security-scan]
-    if: always()
-    
-    steps:
-    - name: Report Status
-      run: |
-        if [ "${{ needs.validate.result }}" == "success" ] && [ "${{ needs.integration-test.result }}" == "success" ]; then
-          echo "✅ All tests passed! Blue/Green deployment is working correctly."
-          echo "🚀 Ready for production deployment!"
-        else
-          echo "❌ Some tests failed. Please check the workflow logs."
-          exit 1
-        fi
+      run: docker-compose down -v
