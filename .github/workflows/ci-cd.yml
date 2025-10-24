@@ -1,0 +1,268 @@
+name: Blue/Green Deployment CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Job 1: Code Quality and Validation
+  validate:
+    name: Validate Configuration
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Validate Docker Compose
+      run: |
+        echo "🔍 Validating Docker Compose configuration..."
+        docker-compose config
+        
+    - name: Validate Nginx Configuration
+      run: |
+        echo "🔍 Validating Nginx configuration..."
+        docker run --rm -v ${PWD}:/config nginx:1.25-alpine nginx -t -c /config/nginx.conf
+        
+    - name: Check Shell Scripts
+      run: |
+        echo "🔍 Validating shell scripts..."
+        shellcheck test-simple.sh test-failover.sh || echo "ShellCheck warnings (non-blocking)"
+        
+    - name: Test Environment Variables
+      run: |
+        echo "🔍 Testing environment variable substitution..."
+        BLUE_IMAGE=test-blue GREEN_IMAGE=test-green docker-compose config | grep -q "test-blue"
+        BLUE_IMAGE=test-blue GREEN_IMAGE=test-green docker-compose config | grep -q "test-green"
+        echo "✅ Environment variable substitution working correctly"
+
+  # Job 2: Integration Tests
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Docker Compose
+      run: |
+        echo "🐳 Setting up Docker Compose..."
+        docker-compose version
+
+    - name: Start Blue/Green Deployment
+      run: |
+        echo "🚀 Starting Blue/Green deployment..."
+        BLUE_IMAGE=node:18-alpine \
+        GREEN_IMAGE=node:18-alpine \
+        RELEASE_ID_BLUE=ci-test-blue \
+        RELEASE_ID_GREEN=ci-test-green \
+        docker-compose up -d
+        
+    - name: Wait for Services
+      run: |
+        echo "⏳ Waiting for services to be healthy..."
+        timeout 60s bash -c 'until docker-compose ps | grep -q "(healthy)"; do sleep 5; echo "Waiting..."; done'
+        docker-compose ps
+        
+    - name: Run Basic Tests
+      run: |
+        echo "🧪 Running basic functionality tests..."
+        
+        # Test direct access
+        echo "Testing Blue direct access..."
+        curl -f http://localhost:8081/healthz
+        curl -f http://localhost:8081/version
+        
+        echo "Testing Green direct access..."
+        curl -f http://localhost:8082/healthz
+        curl -f http://localhost:8082/version
+        
+        echo "Testing Nginx proxy..."
+        curl -f http://localhost:8090/healthz
+        response=$(curl -s http://localhost:8090/version)
+        echo "$response"
+        
+        # Verify headers
+        echo "Verifying headers..."
+        blue_headers=$(curl -s -I http://localhost:8081/version)
+        echo "$blue_headers" | grep -q "X-App-Pool: blue" || (echo "❌ Missing X-App-Pool header" && exit 1)
+        
+        green_headers=$(curl -s -I http://localhost:8082/version)
+        echo "$green_headers" | grep -q "X-App-Pool: green" || (echo "❌ Missing X-App-Pool header" && exit 1)
+
+    - name: Test Failover Scenario
+      run: |
+        echo "🌪️ Testing failover scenario..."
+        
+        # Verify initial state (should be Blue)
+        echo "Initial state (should be Blue):"
+        for i in {1..3}; do
+          pool=$(curl -s http://localhost:8090/version | grep -o '"pool":"[^"]*' | cut -d'"' -f4)
+          echo "Request $i: $pool"
+          if [ "$pool" != "blue" ]; then
+            echo "❌ Expected blue but got $pool"
+            exit 1
+          fi
+          sleep 1
+        done
+        
+        # Stop Blue service
+        echo "Stopping Blue service to trigger failover..."
+        docker-compose stop app_blue
+        
+        # Wait for failover
+        echo "Waiting for failover to Green..."
+        sleep 15
+        
+        # Verify failover to Green
+        echo "Testing failover (should be Green):"
+        green_count=0
+        for i in {1..5}; do
+          pool=$(curl -s http://localhost:8090/version | grep -o '"pool":"[^"]*' | cut -d'"' -f4)
+          echo "Request $i: $pool"
+          if [ "$pool" = "green" ]; then
+            ((green_count++))
+          fi
+          sleep 1
+        done
+        
+        if [ $green_count -eq 0 ]; then
+          echo "❌ Failover test failed - no requests routed to Green"
+          exit 1
+        else
+          echo "✅ Failover successful - $green_count/5 requests routed to Green"
+        fi
+
+    - name: Check Nginx Logs
+      run: |
+        echo "📋 Checking Nginx access logs..."
+        docker-compose logs nginx | tail -20
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "🧹 Cleaning up..."
+        docker-compose down -v
+
+  # Job 3: Security Scan
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: validate
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Job 4: Build and Push (Optional - for actual images)
+  build-and-push:
+    name: Build and Push Container Images
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [validate, integration-test]
+    
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata for Docker
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+    - name: Build and push Blue image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile.blue
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-blue:latest
+        labels: ${{ steps.meta.outputs.labels }}
+
+    - name: Build and push Green image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        file: ./Dockerfile.green
+        push: true
+        tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-green:latest
+        labels: ${{ steps.meta.outputs.labels }}
+
+  # Job 5: Deployment (Optional - for demo environments)
+  deploy-demo:
+    name: Deploy to Demo Environment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [integration-test, build-and-push]
+    
+    environment: demo
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Demo
+      run: |
+        echo "🚀 Deploying to demo environment..."
+        # This would typically deploy to a demo/staging environment
+        # For this project, we'll just validate the deployment config
+        BLUE_IMAGE=node:18-alpine \
+        GREEN_IMAGE=node:18-alpine \
+        docker-compose config --services
+        
+        echo "✅ Deployment configuration validated"
+        echo "In a real scenario, this would deploy to your demo environment"
+
+  # Job 6: Notify Success
+  notify:
+    name: Notify Success
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [validate, integration-test, security-scan]
+    
+    steps:
+    - name: Notify on Success
+      if: needs.validate.result == 'success' && needs.integration-test.result == 'success'
+      run: |
+        echo "✅ All tests passed! Blue/Green deployment is working correctly."
+        echo "🚀 Ready for production deployment!"
+        
+    - name: Notify on Failure
+      if: needs.validate.result == 'failure' || needs.integration-test.result == 'failure'
+      run: |
+        echo "❌ Some tests failed. Please check the workflow logs."
+        exit 1
