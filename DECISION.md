@@ -242,7 +242,7 @@ Compliance with Requirements
 
     Header preservation (X-App-Pool, X-Release-Id)
 
-    Port mapping: 8080 (Nginx), 8081 (Blue), 8082 (Green)
+    Port mapping: 8090 (Nginx), 8081 (Blue), 8082 (Green)
 
     Environment variable parameterization
 
