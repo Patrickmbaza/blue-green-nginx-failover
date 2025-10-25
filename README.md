@@ -263,3 +263,5 @@ All application endpoints are automatically proxied through Nginx. The failover 
 
     **Zero
 
+# Link to Google doc:
+ https://docs.google.com/document/d/1_MaPoWV088N5-RLDkujilLwDg5wkO0iuM6O-ysXZ1Ts/edit?usp=sharing
