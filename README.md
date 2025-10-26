@@ -1,267 +1,356 @@
-Blue/Green Deployment with Nginx Auto-Failover
-🚀 Quick Start
-1. Clone and Setup
-bash
+# Blue-Green Deployment with Nginx Auto-Failover
 
-# Copy the environment template (if you have one)
-cp .env.example .env  # Optional - variables can be set via command line
+A production-ready blue-green deployment setup with automatic failover, zero-downtime deployments, and chaos testing capabilities using Docker Compose and Nginx.
 
-2. Start the Deployment
-bash
+## 🚀 Overview
 
-# Start all services with Blue as active
-BLUE_IMAGE=node:18-alpine GREEN_IMAGE=node:18-alpine docker-compose up -d
+This project implements a robust blue-green deployment strategy with the following features:
 
-3. Verify Setup
-bash
+- **Blue-Green Deployment**: Two identical environments (Blue and Green) running simultaneously
+- **Automatic Failover**: Nginx automatically routes traffic to the healthy environment
+- **Zero Downtime**: Seamless switching between environments without service interruption
+- **Chaos Testing**: Built-in endpoints to simulate failures and test resilience
+- **Header Preservation**: Maintains application headers through the proxy layer
 
-# Test through Nginx proxy (port 8090)
-curl http://localhost:8090/version
-
-# You should see JSON response with headers:
-# X-App-Pool: blue
-# X-Release-Id: blue-release-v1.0.0
-
-🏗 Architecture Overview
-text
-
-Client Request (Port 8090)
-     ↓
-Nginx Reverse Proxy
-     ↓
-┌─────────────────┐
-│  Upstream Pool  │
-│  • Blue (8081)  │ ← Primary (Active)
-│  • Green (8082) │ ← Backup (Passive)
-└─────────────────┘
-
-Port Mapping
-
-    Nginx Proxy: http://localhost:8090 (Note: Using 8090 to avoid Jenkins conflict)
-
-    Blue App Direct: http://localhost:8081
-
-    Green App Direct: http://localhost:8082
-
-🧪 Testing Auto-Failover
-Automated Testing
-bash
-
-# Run comprehensive test suite
-chmod +x test-simple.sh test-failover.sh
-
-# Test basic functionality
-./test-simple.sh
-
-# Test auto-failover (requires services to be running)
-./test-failover.sh
-
-Manual Testing
-Step 1: Baseline (Blue Active)
-bash
-
-# All requests should go to Blue
-curl http://localhost:8090/version
-
-Step 2: Simulate Blue Failure
-bash
-
-# Stop Blue container to simulate failure
-docker-compose stop app_blue
-
-# Or use chaos endpoint (returns 500)
-curl -X POST http://localhost:8081/chaos/start
-
-Step 3: Verify Automatic Failover
-bash
-
-# Wait 5-10 seconds for failover, then test
-curl http://localhost:8090/version
-# Should now show:
-# X-App-Pool: green
-# X-Release-Id: green-release-v1.0.0
-
-Step 4: Restore Blue
-bash
-
-# Start Blue container again
-docker-compose start app_blue
-
-# Stop chaos (if used)
-curl -X POST http://localhost:8081/chaos/stop
-
-📊 Monitoring Endpoints
-Service Health
-bash
-
-# Check overall health through Nginx
-curl http://localhost:8090/healthz
-
-# Check Blue directly
-curl http://localhost:8081/healthz
-
-# Check Green directly  
-curl http://localhost:8082/healthz
-
-Version Information
-bash
-
-# Through proxy (respects active pool)
-curl http://localhost:8090/version
-
-# Direct to Blue
-curl http://localhost:8081/version
-
-# Direct to Green
-curl http://localhost:8082/version
-
-Chaos Engineering Endpoints
-bash
-
-# Simulate errors (returns HTTP 500)
-curl -X POST http://localhost:8081/chaos/start
-curl -X POST http://localhost:8082/chaos/start
-
-# Stop chaos simulation
-curl -X POST http://localhost:8081/chaos/stop
-curl -X POST http://localhost:8082/chaos/stop
-
-⚙️ Configuration
-Environment Variables
-
-All configuration is parameterized via environment variables:
-Variable	Purpose	Default
-BLUE_IMAGE	Docker image for Blue service	node:18-alpine
-GREEN_IMAGE	Docker image for Green service	node:18-alpine
-ACTIVE_POOL	Which pool starts as active	blue
-RELEASE_ID_BLUE	Release identifier for Blue	blue-release-v1.0.0
-RELEASE_ID_GREEN	Release identifier for Green	green-release-v1.0.0
-BLUE_PORT	Internal port for Blue app	3000
-GREEN_PORT	Internal port for Green app	3000
-
-Usage Examples:
-bash
-
-# Custom images and release IDs
-BLUE_IMAGE=your-app:blue-1.2.0 \
-GREEN_IMAGE=your-app:green-1.2.0 \
-RELEASE_ID_BLUE=release-1.2.0-blue \
-RELEASE_ID_GREEN=release-1.2.0-green \
-docker-compose up -d
-
-Nginx Failover Settings
-
-    Failure Detection: 2 failures within 5 seconds
-
-    Timeouts: Connect=2s, Read=5s, Send=5s
-
-    Retry Logic: Automatic retry on errors, timeouts, and 5xx status codes
-
-    Max Retries: 2 attempts with 5s timeout
-
-    Header Preservation: All application headers forwarded to clients
-
-🎯 Key Features
-
-    ✅ Zero-downtime failover - Automatic switch to Green when Blue fails
-
-    ✅ Zero failed client requests - Failed requests automatically retried to backup
-
-    ✅ Fast failover - Typically within 5-10 seconds
-
-    ✅ Health checking - Active monitoring with tight timeouts
-
-    ✅ Header preservation - X-App-Pool and X-Release-Id headers forwarded
-
-    ✅ Chaos engineering ready - Built-in failure simulation endpoints
-
-    ✅ Port conflict resolved - Using port 8090 to avoid Jenkins conflicts
-
-🐛 Troubleshooting
-Check Container Status
-bash
-
-docker-compose ps
-docker-compose logs
-
-Verify Nginx Routing
-bash
-
-# Check which upstream handled the request
-curl -I http://localhost:8090/version
-
-# Check nginx access logs
-docker-compose logs nginx | grep upstream
-
-Test Direct Access
-bash
-
-# Bypass Nginx to test apps directly
-curl http://localhost:8081/healthz
-curl http://localhost:8082/healthz
-
-Common Issues
-
-    Port 8090 in use: Change to another port in docker-compose.yml
-
-    Health checks failing: Check if Node.js services started properly
-
-    No failover: Verify max_fails and fail_timeout in nginx config
-
-📝 File Structure
-text
+## 📁 Project Structure
 
 blue-green-nginx/
-├── docker-compose.yml          # Service orchestration
-├── nginx.conf                  # Nginx configuration with failover
-├── test-simple.sh              # Basic functionality test
-├── test-failover.sh            # Auto-failover test
-├── README.md                   # This file
-└── DECISION.md                 # Architecture decisions
+├── docker-compose.yml # Service orchestration
+├── nginx.conf # Nginx load balancer configuration
+├── server.js # Node.js application
+├── package.json # Node.js dependencies
+├── Dockerfile.blue # Blue environment Dockerfile
+├── Dockerfile.green # Green environment Dockerfile
+├── .env.example # Environment variables template
+├── README.md # This file
+└── DECISION.md # Architecture decisions (optional)
+text
 
-🛑 Cleanup
+
+## 🛠️ Prerequisites
+
+- Docker Engine 20.10+
+- Docker Compose 2.0+
+- Git
+
+## ⚡ Quick Start
+
+### 1. Clone and Setup
+
+```bash
+git clone <your-repo-url>
+cd blue-green-nginx
+
+2. Configure Environment
 bash
 
-# Stop and remove containers
+# Copy the environment template
+cp .env.example .env
+
+# Edit with your preferred values
+nano .env
+
+3. Deploy
+bash
+
+# Build and start all services
+docker-compose up -d
+
+# Verify services are running
+docker-compose ps
+
+4. Access the Application
+
+    Main Application: http://localhost:8090
+
+    Blue Service Direct: http://localhost:8081
+
+    Green Service Direct: http://localhost:8082
+
+🔧 Configuration
+Environment Variables (.env)
+bash
+
+BLUE_IMAGE=my-blue-app          # Blue environment image
+GREEN_IMAGE=my-green-app        # Green environment image
+RELEASE_ID_BLUE=blue-1.0.0      # Blue release identifier
+RELEASE_ID_GREEN=green-2.0.0    # Green release identifier
+ACTIVE_POOL=blue                # Initial active environment
+
+Port Mapping
+Service	Host Port	Container Port	Purpose
+Nginx	8099	8080	Main application entry point
+Blue App	8081	3000	Direct access to blue environment
+Green App	8082	3000	Direct access to green environment
+🎯 API Endpoints
+Application Endpoints
+Endpoint	Method	Description
+/	GET	Application root (redirects to /version)
+/version	GET	Returns version info with headers
+/healthz	GET	Health check endpoint
+Chaos Testing Endpoints
+Endpoint	Method	Description
+/chaos/start	POST	Start chaos mode (simulates failures)
+/chaos/stop	POST	Stop chaos mode
+Chaos Mode Parameters
+
+    mode=error - Returns 500 errors
+
+    mode=timeout - Simulates timeouts (not implemented)
+
+🔄 Deployment Workflow
+Normal Operation
+
+    Blue is the active environment receiving 100% of traffic
+
+    Green is the backup environment, ready for failover
+
+    Nginx monitors Blue's health with aggressive timeouts
+
+Failover Scenario
+
+    Blue service starts failing (500 errors or timeouts)
+
+    Nginx detects failures within 1-3 seconds
+
+    Automatic traffic routing to Green environment
+
+    Zero failed client requests (internal retry mechanism)
+
+Manual Deployment Process
+bash
+
+# 1. Deploy new version to Green environment
+# 2. Test Green environment directly (port 8082)
+# 3. Update nginx.conf to switch traffic to Green
+docker-compose exec nginx nginx -s reload
+
+# 4. Blue becomes the new backup
+# 5. Deploy next version to Blue when ready
+
+🧪 Testing
+Basic Health Check
+bash
+
+# Test main application
+curl http://localhost:8090/version
+
+# Test direct access
+curl http://localhost:8081/version  # Blue
+curl http://localhost:8082/version  # Green
+
+Failover Testing
+bash
+
+# 1. Start with normal operation (all traffic to Blue)
+curl http://localhost:8090/version
+
+# 2. Induce chaos on Blue
+curl -X POST "http://localhost:8081/chaos/start?mode=error"
+
+# 3. Wait for failover (2-3 seconds)
+sleep 3
+
+# 4. Verify traffic is routed to Green
+curl http://localhost:8090/version
+
+# 5. Stop chaos
+curl -X POST "http://localhost:8081/chaos/stop"
+
+Headers Verification
+bash
+
+# Check preserved headers
+curl -I http://localhost:8090/version
+
+# Expected headers:
+# X-App-Pool: blue|green
+# X-Release-Id: blue-1.0.0|green-2.0.0
+
+🏗️ Architecture
+Components
+
+    Nginx Load Balancer
+
+        Primary/backup upstream configuration
+
+        Fast failure detection (1 second timeouts)
+
+        Automatic retry to backup server
+
+        Header preservation
+
+    Blue Environment
+
+        Active production environment
+
+        Receives 100% of traffic initially
+
+        Monitored for health issues
+
+    Green Environment
+
+        Backup/staging environment
+
+        Ready for immediate failover
+
+        Used for testing new versions
+
+Nginx Configuration Features
+
+    Fast Failover: max_fails=1 fail_timeout=1s
+
+    Aggressive Timeouts: 500ms connect/send/read timeouts
+
+    Retry Logic: Automatic retry on 5xx errors and timeouts
+
+    No Buffering: Immediate failure detection
+
+    Backup Directive: Green only used when Blue fails
+
+🚨 Monitoring & Logs
+View Logs
+bash
+
+# Nginx logs
+docker-compose logs nginx
+
+# Application logs
+docker-compose logs app_blue
+docker-compose logs app_green
+
+Health Monitoring
+bash
+
+# Check all services
+docker-compose ps
+
+# Test health endpoints
+curl http://localhost:8081/healthz
+curl http://localhost:8082/healthz
+
+🔄 Management Commands
+Service Management
+bash
+
+# Start services
+docker-compose up -d
+
+# Stop services
 docker-compose down
 
-# Stop and remove with volumes
-docker-compose down -v
+# Restart services
+docker-compose restart
 
-# Remove all images
-docker-compose down --rmi all
+# View service status
+docker-compose ps
 
-🔧 Development
-Modifying the Setup
+Nginx Management
+bash
 
-    Change ports: Update ports in docker-compose.yml
+# Reload configuration
+docker-compose exec nginx nginx -s reload
 
-    Adjust failover timing: Modify max_fails and fail_timeout in nginx.conf
+# Test configuration
+docker-compose exec nginx nginx -t
 
-    Custom health checks: Update healthcheck section in docker-compose.yml
+# View current config
+docker-compose exec nginx cat /etc/nginx/nginx.conf
 
-Adding New Endpoints
+🛡️ Production Considerations
+Security
 
-All application endpoints are automatically proxied through Nginx. The failover logic applies to all routes.
-📈 Performance Characteristics
+    Environment variables for configuration
 
-    Failover Time: 5-10 seconds (configurable)
+    No sensitive data in version control
 
-    Request Timeout: Maximum 10 seconds (5s primary + 5s retry)
+    Container isolation
 
-    Health Check Interval: 5 seconds
+    Port security
 
-    Concurrent Connections: 1024 workers
+Reliability
 
-🚨 Important Notes
+    Fast failure detection (sub-second)
 
-    Port 8090: Using this port instead of 8080 to avoid conflicts with Jenkins
+    Automatic recovery
 
-    Direct Access: Use ports 8081/8082 only for chaos testing, not normal traffic
+    Health checking
 
-    Header Verification: Always check X-App-Pool header to see which service handled the request
+    Graceful degradation
 
-    **Zero
+Scalability
 
-# Link to Google doc:
-https://docs.google.com/document/d/1_MaPoWV088N5-RLDkujilLwDg5wkO0iuM6O-ysXZ1Ts/edit?usp=sharing
+    Easy to add more instances
+
+    Load balancer ready
+
+    Stateless application design
+
+🐛 Troubleshooting
+Common Issues
+
+    Port Conflicts
+    bash
+
+# Check port usage
+sudo netstat -tulpn | grep :8099
+
+Container Issues
+bash
+
+# Check container status
+docker-compose ps
+
+# View logs
+docker-compose logs
+
+Nginx Configuration
+bash
+
+# Test configuration
+docker-compose exec nginx nginx -t
+
+# Reload configuration
+docker-compose exec nginx nginx -s reload
+
+Debugging Failover
+bash
+
+# Check if failover is working
+curl -X POST "http://localhost:8081/chaos/start?mode=error"
+sleep 3
+for i in {1..5}; do curl -s http://localhost:8090/version | grep '"pool"'; done
+curl -X POST "http://localhost:8081/chaos/stop"
+
+📈 Performance
+
+    Failover Time: 1-3 seconds
+
+    Request Timeout: 500ms
+
+    Health Check: Continuous
+
+    Memory: Minimal overhead
+
+🤝 Contributing
+
+    Fork the repository
+
+    Create a feature branch
+
+    Make your changes
+
+    Test thoroughly
+
+    Submit a pull request
+
+📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+🙏 Acknowledgments
+
+    Nginx for robust load balancing
+
+    Docker for containerization
+
+    Node.js for the application runtime
