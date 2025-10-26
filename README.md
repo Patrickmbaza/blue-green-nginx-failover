@@ -344,11 +344,6 @@ curl -X POST "http://localhost:8081/chaos/stop"
 
     Submit a pull request
 
-📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-🙏 Acknowledgments
-
     Nginx for robust load balancing
 
     Docker for containerization
