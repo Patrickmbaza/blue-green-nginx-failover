@@ -79,7 +79,7 @@ ACTIVE_POOL=blue                # Initial active environment
 
 Port Mapping
 Service	Host Port	Container Port	Purpose
-Nginx	8099	8080	Main application entry point
+Nginx	8090	8080	Main application entry point
 Blue App	8081	3000	Direct access to blue environment
 Green App	8082	3000	Direct access to green environment
 🎯 API Endpoints
