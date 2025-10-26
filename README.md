@@ -354,3 +354,14 @@ This project is licensed under the MIT License - see the LICENSE file for detail
     Docker for containerization
 
     Node.js for the application runtime
+
+
+
+    # Rebuild with the fixed server.js
+docker build -t my-blue-app -f Dockerfile.blue .
+docker build -t my-green-app -f Dockerfile.green .
+
+# Restart services
+docker-compose down
+docker-compose up -d
+sleep 5
