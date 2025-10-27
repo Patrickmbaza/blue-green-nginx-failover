@@ -360,3 +360,21 @@ docker build -t my-green-app -f Dockerfile.green .
 docker-compose down
 docker-compose up -d
 sleep 5
+
+
+
+
+# Start chaos on Blue to trigger auto-failover
+curl -X POST "http://localhost:8081/chaos/start?mode=error"
+
+# Wait for failover (2-3 seconds)
+sleep 3
+
+# Verify all traffic is now going to Green
+echo "Testing failover to Green:"
+for i in {1..5}; do
+    curl -s http://localhost:8090/version | grep -o '"environment":"[^"]*"'
+done
+
+# Keep chaos running to maintain failover
+# When ready to revert: curl -X POST "http://localhost:8081/chaos/stop"
