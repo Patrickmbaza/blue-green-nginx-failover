@@ -15,11 +15,13 @@ services:
       - app-network
 
   app_blue:
-    image: ${BLUE_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile.blue   # use Blue's Dockerfile
     container_name: app_blue
     environment:
       APP_POOL: blue
-      RELEASE_ID: ${RELEASE_ID_BLUE}
+      RELEASE_ID: blue-1.0.0
       PORT: 3000
     ports:
       - "8081:3000"
@@ -27,11 +29,13 @@ services:
       - app-network
 
   app_green:
-    image: ${GREEN_IMAGE}
+    build:
+      context: .
+      dockerfile: Dockerfile.green  # use Green's Dockerfile
     container_name: app_green
     environment:
       APP_POOL: green
-      RELEASE_ID: ${RELEASE_ID_GREEN}
+      RELEASE_ID: green-2.0.0
       PORT: 3000
     ports:
       - "8082:3000"
