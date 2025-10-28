@@ -19,28 +19,42 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * GET /version → returns JSON and headers
- * Headers: X-App-Pool, X-Release-Id
- */
-app.get('/version', (req, res) => {
+// Chaos mode middleware for ALL endpoints except chaos control
+app.use((req, res, next) => {
+  // Skip chaos for chaos control endpoints and health check
+  if (req.path === '/chaos/start' || req.path === '/chaos/stop' || req.path === '/healthz') {
+    return next();
+  }
+  
   if (chaosMode) {
     if (chaosModeType === 'error') {
       return res.status(500).json({
         error: 'Service unavailable - chaos mode active',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        instance: appPool,
+        release: releaseId
       });
     } else if (chaosModeType === 'timeout') {
       // Simulate timeout by not responding
       return setTimeout(() => {
         res.status(504).json({
           error: 'Service timeout - chaos mode active',
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
+          instance: appPool,
+          release: releaseId
         });
       }, 10000); // 10 second timeout
     }
   }
   
+  next();
+});
+
+/**
+ * GET /version → returns JSON and headers
+ * Headers: X-App-Pool, X-Release-Id
+ */
+app.get('/version', (req, res) => {
   res.json({
     version: '1.0.0',
     status: 'healthy',
@@ -104,15 +118,24 @@ app.get('/healthz', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     service: 'Blue-Green Deployment API',
+    description: 'This service demonstrates blue-green deployment with automatic failover',
     endpoints: {
       'GET /version': 'Returns version info with X-App-Pool and X-Release-Id headers',
       'POST /chaos/start': 'Simulates downtime (500s or timeout)',
       'POST /chaos/stop': 'Ends simulated downtime', 
       'GET /healthz': 'Process liveness check'
     },
-    current_environment: appPool,
-    release: releaseId,
-    chaos_mode: chaosMode ? `${chaosModeType} mode` : 'inactive'
+    this_instance: {
+      environment: appPool,
+      release: releaseId,
+      status: 'healthy',
+      port: port,
+      timestamp: new Date().toISOString()
+    },
+    headers_provided: {
+      'X-App-Pool': 'Identifies which pool (blue/green) served this request',
+      'X-Release-Id': 'Identifies the release version of this instance'
+    }
   });
 });
 
