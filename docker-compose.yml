@@ -3,6 +3,7 @@ version: '3.8'
 services:
   nginx:
     image: nginx:1.25-alpine
+    container_name: nginx
     ports:
       - "8090:8080"
     volumes:
@@ -10,21 +11,33 @@ services:
     depends_on:
       - app_blue
       - app_green
+    networks:
+      - app-network
 
   app_blue:
     image: ${BLUE_IMAGE}
+    container_name: app_blue
     environment:
       APP_POOL: blue
       RELEASE_ID: ${RELEASE_ID_BLUE}
       PORT: 3000
     ports:
       - "8081:3000"
+    networks:
+      - app-network
 
   app_green:
     image: ${GREEN_IMAGE}
+    container_name: app_green
     environment:
       APP_POOL: green
       RELEASE_ID: ${RELEASE_ID_GREEN}
       PORT: 3000
     ports:
       - "8082:3000"
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
