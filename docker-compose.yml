@@ -45,6 +45,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.watcher
+    container_name: alert_watcher
     environment:
       - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
       - ERROR_RATE_THRESHOLD=${ERROR_RATE_THRESHOLD:-2.0}
@@ -54,6 +55,7 @@ services:
       - MAINTENANCE_MODE=${MAINTENANCE_MODE:-false}
     volumes:
       - ./nginx/logs:/var/log/nginx:ro
+      - ./watcher.py:/app/watcher.py
     depends_on:
       - nginx
     networks:

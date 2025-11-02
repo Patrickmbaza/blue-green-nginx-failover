@@ -1,13 +1,12 @@
-FROM python:3.9-alpine
+FROM python:3.9-slim
 
 WORKDIR /app
 
-# Install only what we need
-RUN apk add --no-cache curl
+# Install dependencies
+RUN pip install requests
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+# Copy the watcher script
 COPY watcher.py .
 
+# Run the watcher
 CMD ["python", "watcher.py"]
