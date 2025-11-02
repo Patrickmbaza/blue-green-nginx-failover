@@ -1,374 +1,401 @@
-Blue/Green Deployment Runbook
+🚨 Blue-Green Failover System Runbook
 📋 Overview
 
-This runbook documents the Blue/Green deployment system with automatic failover, observability, and alerting. The system consists of:
-
-    Two Node.js applications (Blue and Green) behind Nginx load balancer
-
-    Automatic failover when primary pool experiences failures
-
-    Real-time monitoring via Python log watcher
-
-    Slack alerts for failovers and high error rates
-
-🏗️ Architecture
+This runbook provides operational guidance for the Blue-Green Deployment Failover System with real-time monitoring and alerting. The system automatically detects failovers between blue and green deployment pools and monitors upstream error rates, sending alerts to Slack when issues are detected.
+🔧 System Architecture
 text
 
-Client → Nginx (Port 8090) → [Blue (Port 8081) | Green (Port 8082)]
-                              ↑
-                      Python Watcher → Slack Alerts
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│   Client    │───▶│    Nginx    │───▶│  App Blue   │    │  Slack      │
+│             │    │  Load       │    │  (v1.0.0)   │    │  Alerts     │
+│             │    │  Balancer   │───▶│  App Green  │────│             │
+└─────────────┘    └─────────────┘    │  (v2.0.0)   │    └─────────────┘
+                               ┌──────▶│             │
+                               │      └─────────────┘
+                               │      ┌─────────────┐
+                               │      │ Log Watcher │
+                               └──────│ (Python)    │
+                                      └─────────────┘
 
-🚨 Alert Types and Responses
-🔄 FAILOVER DETECTED
+📊 Alert Types
+1. 🚨 Failover Detected Alert
 
-What Happened: Traffic automatically switched from primary to backup pool due to failures.
+Slack Message Format:
+text
 
-Severity: HIGH
+:rotating_light: FAILOVER DETECTED
 
-Immediate Actions:
+From: blue
+To: green  
+Time: 02/Nov/2025:10:57:55 +0000
+Release: green-2.0.0
+Request: GET /version
 
-    ✅ Check primary pool health: docker compose logs app_blue --tail=20
+What This Means:
 
-    ✅ Verify failover was successful: curl http://localhost:8090/version
+    The system has automatically switched traffic from one deployment pool to another
 
-    ✅ Check if chaos mode is active: curl http://localhost:8081/ | grep chaos_mode
+    This typically occurs when the primary pool experiences failures (5xx errors or timeouts)
 
-    ✅ Monitor backup pool performance: docker compose logs app_green --tail=10
+    Nginx's proxy_next_upstream mechanism triggered the failover
 
-Investigation Steps:
+Operator Actions:
+🔍 Immediate Investigation (First 5 minutes)
+
+    Check Service Health:
+    bash
+
+# Check which pool is currently serving traffic
+curl http://localhost:8090/version | grep -o "blue\|green"
+
+# Check health of both pools directly
+curl http://localhost:8081/healthz
+curl http://localhost:8082/healthz
+
+Review Container Status:
 bash
 
-# 1. Check application logs for errors
-docker compose logs app_blue --tail=50 | grep -i "error\|fail"
+docker-compose ps
+docker-compose logs app_blue --tail=20
+docker-compose logs app_green --tail=20
 
-# 2. Verify resource usage
-docker compose exec app_blue ps aux
-
-# 3. Check network connectivity
-docker compose exec app_blue ping app_green
-
-# 4. Review recent requests
-docker compose exec nginx tail -20 /var/log/nginx/access.log.custom
-
-Recovery Procedure:
+Check Error Patterns:
 bash
 
-# If primary issue is resolved, restore traffic to Blue:
-curl -X POST "http://localhost:8081/chaos/stop"
-docker compose restart nginx
+# Count recent errors in nginx logs
+docker-compose exec nginx grep " 500 " /var/log/nginx/access.log | wc -l
 
-🔴 HIGH ERROR RATE
+# View recent failovers
+docker-compose logs alert_watcher | grep "FAILOVER DETECTED" | tail -5
 
-What Happened: More than 2% of requests are returning 5xx errors in the last 200 requests.
+🛠️ Remediation Actions
 
-Severity: MEDIUM
+If Blue Pool Failed:
+bash
 
-Immediate Actions:
+# Investigate blue service issues
+docker-compose logs app_blue --tail=50
+docker-compose exec app_blue curl localhost:3000/healthz
 
-    ✅ Check recent logs: docker compose logs nginx --tail=50
+# Restart if necessary
+docker-compose restart app_blue
 
-    ✅ Verify both pools are healthy:
+# Monitor recovery
+watch -n 2 'curl -s http://localhost:8090/version | grep -o "blue\|green"'
+
+If Green Pool Failed:
+bash
+
+# Investigate green service issues  
+docker-compose logs app_green --tail=50
+docker-compose exec app_green curl localhost:3000/healthz
+
+# Restart if necessary
+docker-compose restart app_green
+
+✅ Recovery Confirmation
+
+    Monitor for automatic failback when the original pool recovers
+
+    Verify both pools are healthy:
     bash
 
 curl http://localhost:8081/healthz
 curl http://localhost:8082/healthz
 
-    ✅ Check for resource exhaustion: docker system stats
+2. 📊 High Error Rate Alert
 
-    ✅ Review application metrics
+Slack Message Format:
+text
 
-Error Rate Calculation:
+:exclamation: HIGH ERROR RATE DETECTED
 
-    Threshold: 2% (configurable via ERROR_RATE_THRESHOLD)
+Error Rate: 40.0%
+Threshold: 2.0%
+Window Size: 200
+Time: 02/Nov/2025:10:55:36 +0000
+Details: 80 errors in last 200 requests
 
-    Window: 200 requests (configurable via WINDOW_SIZE)
+What This Means:
 
-    Cooldown: 300 seconds between alerts (configurable via ALERT_COOLDOWN_SEC)
+    More than 2% of requests in the last 200 requests returned 5xx errors
 
-Troubleshooting:
+    This indicates potential instability in the upstream services
+
+    The system is experiencing elevated error rates across both pools
+
+Operator Actions:
+🔍 Immediate Investigation
+
+    Check Current Error Rate:
+    bash
+
+# Real-time error rate monitoring
+watch -n 5 '
+total=$(docker-compose exec nginx tail -100 /var/log/nginx/access.log | wc -l)
+errors=$(docker-compose exec nginx tail -100 /var/log/nginx/access.log | grep " 500 " | wc -l)
+rate=$((errors * 100 / total))
+echo "Error rate: $rate% ($errors/$total errors)"
+'
+
+Identify Error Sources:
 bash
 
-# Check error patterns
-docker compose exec nginx grep "status=5" /var/log/nginx/access.log.custom
+# Check which pool is generating errors
+docker-compose exec nginx grep " 500 " /var/log/nginx/access.log | grep -o "pool:[^ ]*" | sort | uniq -c
 
-# Monitor real-time traffic
-watch -n 2 'curl -s http://localhost:8090/version | grep environment'
+# Check specific error patterns
+docker-compose exec nginx grep " 500 " /var/log/nginx/access.log | tail -10
 
-# Check watcher status
-docker compose logs alert_watcher --tail=10
-
-🛠️ Operational Procedures
-Starting the System
+Service Health Deep Dive:
 bash
 
-# 1. Set environment variables
-cp .env.example .env
-# Edit .env with your Slack webhook and configuration
+# Check both services
+for service in app_blue app_green; do
+  echo "=== $service ==="
+  docker-compose logs $service --tail=20 | grep -i "error\|exception\|timeout"
+done
 
-# 2. Start all services
-docker compose up -d
+# Resource usage
+docker stats --no-stream $(docker-compose ps -q)
 
-# 3. Verify all services are running
-docker compose ps
+🛠️ Remediation Actions
 
-# 4. Test initial setup
-curl http://localhost:8090/version
-
-Stopping the System
+For Widespread Errors (Both Pools):
 bash
 
-# Graceful shutdown
-docker compose down
+# Check for infrastructure issues
+docker-compose logs nginx --tail=20
+docker-compose logs alert_watcher --tail=20
 
-# Force shutdown (removes volumes)
-docker compose down -v
+# Restart affected services
+docker-compose restart app_blue app_green
 
-Maintenance Mode
+# Monitor recovery
+watch -n 2 '
+curl -s http://localhost:8081/healthz | grep -q healthy && echo "Blue: ✅" || echo "Blue: ❌"
+curl -s http://localhost:8082/healthz | grep -q healthy && echo "Green: ✅" || echo "Green: ❌"
+'
 
-To suppress alerts during planned maintenance:
+For Single Pool Errors:
 bash
 
-# 1. Set cooldown to maximum
-echo "ALERT_COOLDOWN_SEC=86400" >> .env  # 24 hours
+# Isolate problematic pool
+if docker-compose exec nginx grep " 500 " /var/log/nginx/access.log | grep "pool:blue" | head -5; then
+  echo "Blue pool has issues - investigate:"
+  docker-compose logs app_blue --tail=30
+elif docker-compose exec nginx grep " 500 " /var/log/nginx/access.log | grep "pool:green" | head -5; then
+  echo "Green pool has issues - investigate:"
+  docker-compose logs app_green --tail=30
+fi
 
-# 2. Restart watcher
-docker compose restart alert_watcher
+✅ Recovery Confirmation
 
-# 3. Perform maintenance tasks
-# ... your maintenance here ...
+    Monitor error rate dropping below threshold
 
-# 4. Restore normal alerting
-# Edit .env and set ALERT_COOLDOWN_SEC back to 300
-docker compose restart alert_watcher
+    Verify alert cooldown has reset:
+    bash
 
-Manual Pool Switching
-bash
+# Check if error rate has normalized
+total=$(docker-compose exec nginx tail -50 /var/log/nginx/access.log | wc -l)
+errors=$(docker-compose exec nginx tail -50 /var/log/nginx/access.log | grep " 500 " | wc -l)
+echo "Current error rate: $((errors * 100 / total))%"
 
-# Switch to Green pool
-docker compose stop app_blue
-# Traffic will automatically failover to Green
-
-# Switch back to Blue pool
-docker compose start app_blue
-docker compose restart nginx
-
-🔧 Configuration Reference
+⚙️ Configuration Reference
 Environment Variables (.env)
 bash
 
-# Application
-ACTIVE_POOL=blue
-RELEASE_ID_BLUE=blue-1.0.0
-RELEASE_ID_GREEN=green-2.0.0
-
-# Slack Integration
-SLACK_WEBHOOK_URL=https://hooks.slack.com/services/your/webhook/url
+# Required: Slack Webhook
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
 
 # Alert Configuration
-ERROR_RATE_THRESHOLD=2.0
-WINDOW_SIZE=200
-ALERT_COOLDOWN_SEC=300
+ERROR_RATE_THRESHOLD=2.0        # Percentage of errors to trigger alert
+WINDOW_SIZE=200                 # Number of requests to monitor for error rate
+ALERT_COOLDOWN_SEC=300          # Seconds between duplicate alerts
 
-Nginx Configuration
+# System Configuration  
+ACTIVE_POOL=blue                # Initial active pool
+MAINTENANCE_MODE=false          # Set to true to suppress alerts during maintenance
 
-    Listen Port: 8080 (mapped to 8090 on host)
-
-    Failover: Automatic on 5xx errors or timeouts
-
-    Timeouts:
-
-        Connect: 1s
-
-        Send: 2s
-
-        Read: 2s
-
-    Retry Policy: 2 attempts on errors/5xx
-
-📊 Monitoring and Logging
-Accessing Logs
-bash
-
-# Nginx access logs (structured format)
-docker compose exec nginx tail -f /var/log/nginx/access.log.custom
-
-# Application logs
-docker compose logs -f app_blue
-docker compose logs -f app_green
-
-# Watcher logs
-docker compose logs -f alert_watcher
-
-# All services combined
-docker compose logs -f
-
-Log Format
-
-Nginx logs include:
+Nginx Log Format
 text
 
-time=[timestamp]|method=[HTTP_METHOD]|uri=[URI]|status=[STATUS]|
-upstream_addr=[UPSTREAM]|upstream_status=[UPSTREAM_STATUS]|
-upstream_response_time=[TIME]|request_time=[TIME]|
-pool=[blue|green]|release=[RELEASE_ID]
+Log format: enhanced
+Fields captured:
+- pool: $upstream_http_x_app_pool
+- release: $upstream_http_x_release_id  
+- upstream_status: $upstream_status
+- upstream: $upstream_addr
+- request_time: $request_time
+- upstream_response_time: $upstream_response_time
 
-Health Checks
+🛡️ Maintenance Procedures
+Planned Maintenance Mode
+
+Before starting maintenance:
+bash
+
+# Set maintenance mode to suppress alerts
+export MAINTENANCE_MODE=true
+docker-compose restart alert_watcher
+
+# Verify maintenance mode is active
+docker-compose exec alert_watcher python3 -c "import os; print('Maintenance mode:', os.getenv('MAINTENANCE_MODE'))"
+
+During maintenance:
+
+    Perform your deployment or maintenance tasks
+
+    No alerts will be sent to Slack
+
+    Logs continue to be processed and monitored
+
+After maintenance:
+bash
+
+# Disable maintenance mode
+export MAINTENANCE_MODE=false
+docker-compose restart alert_watcher
+
+# Verify system is back to normal
+./complete_system_test.sh
+
+Manual Pool Management
+
+Force traffic to specific pool:
+bash
+
+# Stop one pool to force all traffic to the other
+docker-compose stop app_green  # Force traffic to blue
+# or
+docker-compose stop app_blue   # Force traffic to green
+
+# Restart stopped pool when ready
+docker-compose start app_green
+
+📈 Monitoring & Observability
+Key Metrics to Monitor
+
+    Failover Frequency
+    bash
+
+# Count failovers in last hour
+docker-compose logs alert_watcher --since 1h | grep "FAILOVER DETECTED" | wc -l
+
+Error Rate Trends
+bash
+
+# Error rate over time
+docker-compose exec nginx sh -c "
+  echo 'Time,TotalRequests,Errors,ErrorRate'
+  for i in 1 2 3 4 5; do
+    total=\$(tail -100 /var/log/nginx/access.log | wc -l)
+    errors=\$(tail -100 /var/log/nginx/access.log | grep ' 500 ' | wc -l)
+    rate=\$((errors * 100 / total))
+    echo \"\$(date),\$total,\$errors,\$rate%\"
+    sleep 60
+  done
+"
+
+Response Time Monitoring
+bash
+
+# Check latency percentiles
+docker-compose exec nginx tail -1000 /var/log/nginx/access.log | \
+  grep -o 'request_time:[0-9.]*' | cut -d: -f2 | sort -n | \
+  awk '{
+    a[i++]=$0
+  } END {
+    print "P50:", a[int(i*0.5)]
+    print "P95:", a[int(i*0.95)] 
+    print "P99:", a[int(i*0.99)]
+  }'
+
+Health Check Endpoints
 bash
 
 # Application health
-curl http://localhost:8081/healthz
-curl http://localhost:8082/healthz
+curl http://localhost:8081/healthz  # Blue pool
+curl http://localhost:8082/healthz  # Green pool
 
-# Through load balancer
-curl http://localhost:8090/healthz
-
-# Version info (includes pool info)
+# Nginx status
 curl http://localhost:8090/version
 
-🧪 Testing Procedures
-Failover Test
+# Watcher status
+docker-compose logs alert_watcher --tail=5
+
+🚨 Emergency Procedures
+System Unresponsive
 bash
 
-# 1. Induce failures on Blue
-curl -X POST "http://localhost:8081/chaos/start?mode=error"
+# Restart entire stack
+docker-compose down
+docker-compose up -d
 
-# 2. Generate traffic to trigger failover
-for i in {1..10}; do
-  curl -s http://localhost:8090/version > /dev/null
-done
+# Verify recovery
+docker-compose ps
+curl http://localhost:8090/healthz
 
-# 3. Verify failover occurred
-curl http://localhost:8090/version  # Should show "green"
-
-# 4. Check for Slack alert
-# ... check your Slack channel ...
-
-# 5. Restore normal operation
-curl -X POST "http://localhost:8081/chaos/stop"
-docker compose restart nginx
-
-Error Rate Test
+Alert Storm
 bash
 
-# Generate enough errors to trigger alert
-for i in {1..50}; do
-  curl -s http://localhost:8081/ > /dev/null  # Direct to Blue with chaos
-done
+# Temporarily increase cooldown period
+export ALERT_COOLDOWN_SEC=600  # 10 minutes
+docker-compose restart alert_watcher
 
-# Check watcher logs for error rate alert
-docker compose logs alert_watcher --tail=20
+# Or enable maintenance mode
+export MAINTENANCE_MODE=true
+docker-compose restart alert_watcher
 
-🚒 Emergency Procedures
-Service Unavailable
+Database/External Dependency Issues
 bash
 
-# Check all services status
-docker compose ps
+# Check for external dependency errors in logs
+docker-compose logs app_blue app_green | grep -i "database\|connection\|timeout"
 
-# Restart specific service
-docker compose restart [service_name]
+# If needed, disable chaos mode on both services
+curl -X POST http://localhost:8081/chaos/stop
+curl -X POST http://localhost:8082/chaos/stop
 
-# Complete restart
-docker compose restart
+📞 Escalation Procedures
+Level 1 (First 15 minutes)
 
-Watcher Not Working
-bash
+    Follow runbook procedures above
 
-# Check if watcher is running
-docker compose ps alert_watcher
+    Attempt basic remediation (restart services)
 
-# Check watcher process
-docker compose exec alert_watcher ps aux
+    Document actions taken
 
-# Restart watcher
-docker compose restart alert_watcher
+Level 2 (15-30 minutes)
 
-# Manual test
-docker compose run --rm alert_watcher python simple_watcher.py
+    Engage development team if application issues suspected
 
-Slack Alerts Not Working
-bash
+    Check for recent deployments or changes
 
-# Test webhook manually
-docker compose run --rm alert_watcher python test_slack.py
+    Consider rolling back to previous version
 
-# Check environment variable
-docker compose exec alert_watcher env | grep SLACK
+Level 3 (30+ minutes)
 
-# Verify webhook URL in Slack app settings
+    Engage infrastructure team
 
-📈 Performance Metrics
-Key Metrics to Monitor
+    Consider failover to disaster recovery environment
 
-    Response Time: upstream_response_time in logs
+    Executive communication if customer impact
 
-    Error Rate: Percentage of 5xx responses
+✅ Success Criteria
 
-    Failover Frequency: How often pools switch
+Issue Resolved When:
 
-    Request Volume: Requests per minute
+    Error rate below 2% for 5 consecutive minutes
 
-Log Analysis Commands
-bash
+    No failover events for 10 minutes
 
-# Count requests per pool
-docker compose exec nginx grep -c "pool=blue" /var/log/nginx/access.log.custom
-docker compose exec nginx grep -c "pool=green" /var/log/nginx/access.log.custom
+    All health checks passing
 
-# Error rate calculation
-docker compose exec nginx awk -F'|' '$4 ~ /status=5[0-9][0-9]/ {count++} END {print "5xx errors:", count}' /var/log/nginx/access.log.custom
+    Alert cooldown periods respected
 
-# Average response time
-docker compose exec nginx awk -F'|' '{split($7,a,"="); sum+=a[2]; count++} END {print "Avg response time:", sum/count}' /var/log/nginx/access.log.custom
+    Post-mortem scheduled if needed
 
-🔄 Recovery Scenarios
-Scenario 1: Blue Pool Failing
-
-Symptoms: High error rate, failover to Green
-Recovery:
-
-    Investigate Blue pool issues
-
-    Fix underlying problem
-
-    Stop chaos mode: curl -X POST "http://localhost:8081/chaos/stop"
-
-    Restart nginx to restore Blue: docker compose restart nginx
-
-Scenario 2: Both Pools Failing
-
-Symptoms: All requests failing, no healthy upstream
-Recovery:
-
-    Check infrastructure issues
-
-    Restart all services: docker compose restart
-
-    Verify health checks pass
-
-    Monitor traffic restoration
-
-Scenario 3: Watcher Process Stopped
-
-Symptoms: No Slack alerts, watcher container exited
-Recovery:
-
-    Restart watcher: docker compose restart alert_watcher
-
-    Check logs for errors: docker compose logs alert_watcher
-
-    Verify Python dependencies: docker compose exec alert_watcher pip list
-
-📞 Contact Information
-
-    Primary On-call: [Team Lead]
-
-    Secondary On-call: [Backup Engineer]
-
-    Slack Channel: #blue-green-alerts
-
-    Documentation: [Link to internal docs]
-
-Last Updated: October 2025
+Last Updated: November 2025
 Maintainer: DevOps Team
 Review Schedule: Quarterly
