@@ -22,7 +22,6 @@ services:
       - APP_ENV=blue
       - APP_COLOR=blue
       - APP_POOL=blue
-      - ENVIRONMENT=blue
       - RELEASE_ID=blue-1.0.0
       - PORT=3000
     networks:
@@ -37,7 +36,6 @@ services:
       - APP_ENV=green
       - APP_COLOR=green
       - APP_POOL=green
-      - ENVIRONMENT=green
       - RELEASE_ID=green-2.0.0
       - PORT=3000
     networks:
