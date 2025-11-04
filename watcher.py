@@ -6,6 +6,7 @@ Alert Watcher for Blue-Green Nginx Failover
 - 300 second cooldown for all alerts
 - Maintenance mode support
 - Active pool tracking
+- Includes timestamp extraction from Nginx logs
 """
 
 import os
@@ -15,6 +16,7 @@ import logging
 from typing import Optional, Dict, List
 import requests
 import json
+from datetime import datetime
 
 # Configuration from environment variables - EXACTLY as required
 LOG_FILE = "/var/log/nginx/access.log"
@@ -140,13 +142,27 @@ class ErrorRateMonitor:
 
 
 class AlertHandler:
-    """Handle alert delivery to Slack"""
+    """Handle alert delivery to Slack with timestamp support"""
     
     def __init__(self):
         self.last_alert_times: Dict[str, float] = {}
         
-    def send_slack_alert(self, message: str, alert_type: str = "info"):
-        """Send alert to Slack"""
+    def extract_timestamp(self, line: str) -> Optional[str]:
+        """Extract and format timestamp from nginx log line"""
+        try:
+            # Nginx log timestamp format: [04/Nov/2025:10:57:46 +0000]
+            timestamp_match = re.search(r'\[([^\]]+)\]', line)
+            if timestamp_match:
+                nginx_time = timestamp_match.group(1)
+                # Convert from 04/Nov/2025:10:57:46 +0000 to 2025-11-04 10:57:46 UTC
+                dt = datetime.strptime(nginx_time, '%d/%b/%Y:%H:%M:%S %z')
+                return dt.strftime('%Y-%m-%d %H:%M:%S UTC')
+        except Exception as e:
+            logger.debug(f"Error parsing timestamp: {e}")
+        return None
+        
+    def send_slack_alert(self, message: str, alert_type: str = "info", timestamp: str = None):
+        """Send alert to Slack with timestamp"""
         if not SLACK_WEBHOOK_URL:
             logger.warning("Slack webhook URL not configured")
             return False
@@ -170,10 +186,32 @@ class AlertHandler:
                 title = "🚨 Failover Detected"
             elif "error_rate" in alert_type:
                 color = "danger" 
-                title = "🚨 High Error Rate"
+                title = "📊 High Error Rate"
             else:
                 color = "good"
                 title = "ℹ️ Alert"
+            
+            # Build fields array
+            fields = [
+                {
+                    "title": "Environment",
+                    "value": "Production",
+                    "short": True
+                },
+                {
+                    "title": "Maintenance Mode",
+                    "value": "Enabled" if MAINTENANCE_MODE else "Disabled",
+                    "short": True
+                }
+            ]
+            
+            # Add timestamp field if available
+            if timestamp:
+                fields.insert(0, {
+                    "title": "Time",
+                    "value": timestamp,
+                    "short": True
+                })
             
             payload = {
                 "attachments": [
@@ -183,18 +221,7 @@ class AlertHandler:
                         "text": message,
                         "ts": time.time(),
                         "footer": "Nginx Failover Monitor - Stage 3",
-                        "fields": [
-                            {
-                                "title": "Environment",
-                                "value": "Production",
-                                "short": True
-                            },
-                            {
-                                "title": "Maintenance Mode",
-                                "value": "Enabled" if MAINTENANCE_MODE else "Disabled",
-                                "short": True
-                            }
-                        ]
+                        "fields": fields
                     }
                 ]
             }
@@ -217,19 +244,19 @@ class AlertHandler:
             logger.error(f"Error sending Slack alert: {e}")
             return False
     
-    def send_failover_alert(self, from_pool: str, to_pool: str):
-        """Send failover alert"""
+    def send_failover_alert(self, from_pool: str, to_pool: str, timestamp: str = None):
+        """Send failover alert with timestamp"""
         message = f"Failover from *{from_pool}* → *{to_pool}*"
-        return self.send_slack_alert(message, "failover")
+        return self.send_slack_alert(message, "failover", timestamp)
     
-    def send_error_rate_alert(self, error_rate: float, error_count: int):
-        """Send error rate alert"""
+    def send_error_rate_alert(self, error_rate: float, error_count: int, timestamp: str = None):
+        """Send error rate alert with timestamp"""
         message = f"High error rate detected: *{error_rate:.1f}%* ({error_count}/{WINDOW_SIZE} requests)\n*Threshold: {ERROR_RATE_THRESHOLD}%*"
-        return self.send_slack_alert(message, "error_rate")
+        return self.send_slack_alert(message, "error_rate", timestamp)
 
 
 class LogProcessor:
-    """Process nginx access logs"""
+    """Process nginx access logs with timestamp extraction"""
     
     def __init__(self):
         self.failover_detector = FailoverDetector()
@@ -272,9 +299,12 @@ class LogProcessor:
             return None
     
     def process_line(self, line: str):
-        """Process a single log line"""
+        """Process a single log line with timestamp extraction"""
         if not line.strip():
             return
+        
+        # Extract timestamp from the log line
+        timestamp = self.alert_handler.extract_timestamp(line)
             
         # Extract pool information
         current_pool = self.extract_pool_from_line(line)
@@ -282,7 +312,7 @@ class LogProcessor:
             # Check for failover
             is_failover, from_pool, to_pool = self.failover_detector.detect_failover(current_pool)
             if is_failover and from_pool and to_pool:
-                self.alert_handler.send_failover_alert(from_pool, to_pool)
+                self.alert_handler.send_failover_alert(from_pool, to_pool, timestamp)
         
         # Extract status code for error monitoring
         status_code = self.extract_status_code(line)
@@ -293,7 +323,7 @@ class LogProcessor:
             if self.error_monitor.should_alert():
                 error_rate = self.error_monitor.get_error_rate()
                 error_count = sum(self.error_monitor.request_window)
-                self.alert_handler.send_error_rate_alert(error_rate, error_count)
+                self.alert_handler.send_error_rate_alert(error_rate, error_count, timestamp)
     
     def process_existing_logs(self):
         """Process existing log content on startup"""
