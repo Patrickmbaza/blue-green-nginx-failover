@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Alert Watcher for Blue-Green Nginx Failover
+Alert Watcher for Blue-Green Nginx Failover - FIXED VERSION
 - Matches EXACT Stage 3 requirements
 - 2% error rate threshold with 200 request window
 - 300 second cooldown for all alerts
 - Maintenance mode support
 - Active pool tracking
 - Includes timestamp extraction from Nginx logs
+- IMPROVED: Better error detection and log parsing
 """
 
 import os
@@ -96,20 +97,47 @@ class FailoverDetector:
 
 
 class ErrorRateMonitor:
-    """Monitor error rates with 200 request window and 2% threshold"""
+    """Monitor error rates with 200 request window and 2% threshold - IMPROVED VERSION"""
     
     def __init__(self):
         self.request_window: List[bool] = []  # True = error, False = success
         self.last_alert_time: float = 0
+        self.alert_active: bool = False
         
-    def add_request(self, status_code: int):
-        """Add request to monitoring window"""
-        is_error = status_code >= 500  # Consider 5xx as errors
+    def add_request(self, status_code: int, upstream_status: Optional[str] = None):
+        """Add request to monitoring window - IMPROVED error detection"""
+        # Consider both HTTP status and upstream status for errors
+        is_error = False
+        
+        # Check main status code (5xx errors)
+        if status_code >= 500:
+            is_error = True
+            logger.debug(f"Detected error from status code: {status_code}")
+        
+        # Also check upstream_status if available (from enhanced log format)
+        if upstream_status and upstream_status != "-":
+            try:
+                upstream_code = int(upstream_status)
+                if upstream_code >= 500:
+                    is_error = True
+                    logger.debug(f"Detected error from upstream status: {upstream_code}")
+            except ValueError:
+                # If upstream_status is not a number, it might indicate an error
+                if upstream_status in ["timeout", "error"]:
+                    is_error = True
+                    logger.debug(f"Detected error from upstream status: {upstream_status}")
+        
         self.request_window.append(is_error)
         
         # Maintain window size
         if len(self.request_window) > WINDOW_SIZE:
             self.request_window.pop(0)
+            
+        # Log window status periodically for debugging
+        if len(self.request_window) % 50 == 0:
+            error_count = sum(self.request_window)
+            error_rate = (error_count / len(self.request_window)) * 100 if self.request_window else 0
+            logger.info(f"Error rate window: {len(self.request_window)} requests, {error_count} errors ({error_rate:.1f}%)")
     
     def should_alert(self) -> bool:
         """Check if error rate exceeds 2% threshold and cooldown has passed"""
@@ -118,20 +146,29 @@ class ErrorRateMonitor:
             return False
             
         if len(self.request_window) < WINDOW_SIZE:
+            logger.debug(f"Window not full: {len(self.request_window)}/{WINDOW_SIZE}")
             return False
             
         current_time = time.time()
+        
+        # Cooldown check
         if current_time - self.last_alert_time < ALERT_COOLDOWN_SEC:
+            if self.alert_active:
+                logger.debug("Alert cooldown active")
             return False
             
         error_count = sum(self.request_window)
         error_rate = (error_count / len(self.request_window)) * 100
         
+        logger.info(f"Checking error rate: {error_rate:.1f}% ({error_count}/{len(self.request_window)}) - Threshold: {ERROR_RATE_THRESHOLD}%")
+        
         if error_rate >= ERROR_RATE_THRESHOLD:
             self.last_alert_time = current_time
+            self.alert_active = True
             logger.warning(f"🚨 HIGH ERROR RATE: {error_rate:.1f}% ({error_count}/{len(self.request_window)}) - Threshold: {ERROR_RATE_THRESHOLD}%")
             return True
             
+        self.alert_active = False
         return False
     
     def get_error_rate(self) -> float:
@@ -186,7 +223,7 @@ class AlertHandler:
                 title = "🚨 Failover Detected"
             elif "error_rate" in alert_type:
                 color = "danger" 
-                title = "📊 High Error Rate"
+                title = "📊 High Error Rate Alert"
             else:
                 color = "good"
                 title = "ℹ️ Alert"
@@ -202,6 +239,11 @@ class AlertHandler:
                     "title": "Maintenance Mode",
                     "value": "Enabled" if MAINTENANCE_MODE else "Disabled",
                     "short": True
+                },
+                {
+                    "title": "Configuration",
+                    "value": f"Threshold: {ERROR_RATE_THRESHOLD}% | Window: {WINDOW_SIZE} | Cooldown: {ALERT_COOLDOWN_SEC}s",
+                    "short": False
                 }
             ]
             
@@ -237,7 +279,7 @@ class AlertHandler:
                 logger.info(f"✅ {alert_type.upper()} alert sent to Slack: {message}")
                 return True
             else:
-                logger.error(f"Failed to send Slack alert: {response.status_code}")
+                logger.error(f"Failed to send Slack alert: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
@@ -246,35 +288,36 @@ class AlertHandler:
     
     def send_failover_alert(self, from_pool: str, to_pool: str, timestamp: str = None):
         """Send failover alert with timestamp"""
-        message = f"Failover from *{from_pool}* → *{to_pool}*"
+        message = f"Automatic failover detected:\n*{from_pool.upper()}* → *{to_pool.upper()}*\n\nTraffic has been redirected due to upstream issues."
         return self.send_slack_alert(message, "failover", timestamp)
     
     def send_error_rate_alert(self, error_rate: float, error_count: int, timestamp: str = None):
         """Send error rate alert with timestamp"""
-        message = f"High error rate detected: *{error_rate:.1f}%* ({error_count}/{WINDOW_SIZE} requests)\n*Threshold: {ERROR_RATE_THRESHOLD}%*"
+        message = f"High error rate detected!\n\n*Current Rate:* {error_rate:.1f}%\n*Errors:* {error_count}/{WINDOW_SIZE} requests\n*Threshold:* {ERROR_RATE_THRESHOLD}%\n\nInvestigate upstream services for potential issues."
         return self.send_slack_alert(message, "error_rate", timestamp)
 
 
 class LogProcessor:
-    """Process nginx access logs with timestamp extraction"""
+    """Process nginx access logs with timestamp extraction - IMPROVED VERSION"""
     
     def __init__(self):
         self.failover_detector = FailoverDetector()
         self.error_monitor = ErrorRateMonitor()
         self.alert_handler = AlertHandler()
         self.last_position = 0
+        self.processed_count = 0
         
     def extract_pool_from_line(self, line: str) -> Optional[str]:
-        """Extract pool name from log line"""
+        """Extract pool name from log line - IMPROVED parsing"""
         try:
-            # Look for pool:xxx pattern in the log
+            # Look for pool:xxx pattern in the enhanced log format
             pool_match = re.search(r'pool:(\w+)', line)
             if pool_match:
                 pool = pool_match.group(1).strip().lower()
                 if pool in ['blue', 'green']:
                     return pool
                     
-            # Alternative: look for release:xxx pattern
+            # Alternative: look for release:xxx pattern  
             release_match = re.search(r'release:(\w+)-', line)
             if release_match:
                 pool = release_match.group(1).strip().lower()
@@ -287,9 +330,10 @@ class LogProcessor:
             return None
     
     def extract_status_code(self, line: str) -> Optional[int]:
-        """Extract HTTP status code from log line"""
+        """Extract HTTP status code from log line - IMPROVED parsing"""
         try:
-            # Look for HTTP status code pattern
+            # Look for HTTP status code pattern in enhanced format
+            # Format: $status after the request
             status_match = re.search(r'"\s+(\d{3})\s+', line)
             if status_match:
                 return int(status_match.group(1))
@@ -298,10 +342,24 @@ class LogProcessor:
             logger.debug(f"Error extracting status code: {e}")
             return None
     
+    def extract_upstream_status(self, line: str) -> Optional[str]:
+        """Extract upstream_status from enhanced log format"""
+        try:
+            # Look for upstream_status:xxx pattern
+            upstream_match = re.search(r'upstream_status:([^\s]+)', line)
+            if upstream_match:
+                return upstream_match.group(1)
+            return None
+        except Exception as e:
+            logger.debug(f"Error extracting upstream status: {e}")
+            return None
+    
     def process_line(self, line: str):
-        """Process a single log line with timestamp extraction"""
+        """Process a single log line with timestamp extraction - IMPROVED"""
         if not line.strip():
             return
+        
+        self.processed_count += 1
         
         # Extract timestamp from the log line
         timestamp = self.alert_handler.extract_timestamp(line)
@@ -314,12 +372,20 @@ class LogProcessor:
             if is_failover and from_pool and to_pool:
                 self.alert_handler.send_failover_alert(from_pool, to_pool, timestamp)
         
-        # Extract status code for error monitoring
+        # Extract status code and upstream status for error monitoring
         status_code = self.extract_status_code(line)
+        upstream_status = self.extract_upstream_status(line)
+        
         if status_code:
-            self.error_monitor.add_request(status_code)
+            self.error_monitor.add_request(status_code, upstream_status)
             
-            # Check error rate
+            # Check error rate (only log periodically to avoid spam)
+            if self.processed_count % 10 == 0:
+                current_rate = self.error_monitor.get_error_rate()
+                window_size = len(self.error_monitor.request_window)
+                logger.debug(f"Current error rate: {current_rate:.1f}% (window: {window_size})")
+            
+            # Check if we should alert
             if self.error_monitor.should_alert():
                 error_rate = self.error_monitor.get_error_rate()
                 error_count = sum(self.error_monitor.request_window)
@@ -344,6 +410,11 @@ class LogProcessor:
                     
                 self.last_position = f.tell()
                 logger.info(f"Processed {line_count} existing log lines")
+                
+                # Log initial error rate status
+                if self.error_monitor.request_window:
+                    error_rate = self.error_monitor.get_error_rate()
+                    logger.info(f"Initial error rate: {error_rate:.1f}% ({len(self.error_monitor.request_window)} requests in window)")
                 
             logger.info("Finished processing existing log content")
         except Exception as e:
@@ -379,12 +450,13 @@ class LogProcessor:
 
 def main():
     """Main application entry point"""
-    logger.info("Starting Stage 3 Alert Watcher...")
+    logger.info("Starting Stage 3 Alert Watcher - IMPROVED VERSION...")
     logger.info(f"Monitoring log file: {LOG_FILE}")
     
     if not os.path.exists(LOG_FILE):
         logger.error(f"Log file not found: {LOG_FILE}")
-        return
+        logger.info("Waiting for log file to be created...")
+        time.sleep(10)
     
     processor = LogProcessor()
     
